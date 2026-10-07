@@ -1,0 +1,206 @@
+---
+title: djinn, a short guide
+author: Claude Opus 5.5, for Donald
+date: 2026-10-05
+status: draft, not reviewed
+---
+
+# djinn, a short guide
+
+djinn is a code review done by a team of agents. You run one command on
+your branch. Each agent reads the change for one kind of problem, a
+synthesis agent merges what they found into one list and one verdict, and
+everything is saved in an `audits/` folder in your repo. It never changes
+your code; fixing is a separate, explicit step.
+
+Commands are written for Claude Code (`/djinn:review`) and Codex
+(`$djinn-review`). They do the same thing.
+
+## How a review runs
+
+1. **The fence.** djinn compares your branch with its base branch (from
+   `.djinn/config.yaml`) and lists the changed files. That list is the
+   fence: agents report only on those files.
+2. **Wave 1: known-bugchecker**, alone. It checks every changed file
+   against your project's known-bugs index, so the others skip what it
+   already caught.
+3. **Wave 2: the reviewers**, side by side, each read only: bugs,
+   integration, security, format, perf and whichever others the scope or a
+   trigger adds.
+4. **Wave 3: the executing agents**, one at a time, only when asked for:
+   devils-advocate, test-strategist, gate-auditor, dependency-reviewer.
+5. **Synthesis** reads every report, checks each HIGH and MEDIUM against
+   the code, drops duplicates and false alarms, and writes the verdict.
+
+Some agents join on their own when the change calls for them: a UI file
+brings accessibility-reviewer, a manifest or lockfile brings
+dependency-reviewer, a schema or migration brings data-contract-reviewer.
+The audit's `context.md` says which joined and why.
+
+## Reading an audit
+
+The verdict is one of:
+
+- **SHIP**: nothing blocks the merge.
+- **FIX THEN SHIP**: at least one HIGH or MEDIUM is open.
+- **ESCALATE**: agents disagreed on a fact the code could not settle; a
+  person decides.
+
+Findings are tiered:
+
+- **▲ HIGH** and **◆ MEDIUM** block the merge.
+- **● LOW** is worth fixing and does not block.
+- **■ DEBT** is a decision that is cheap now and expensive later.
+- **○ REC** is a recommendation.
+
+Each finding names a file and line, says what goes wrong, and says how the
+agent traced it. The audit page links every finding to its full text.
+
+## Commands
+
+| Claude Code | Codex | What it does |
+|---|---|---|
+| `/djinn:setup` | `$djinn-setup` | sets djinn up in a repo (review does it on first run) |
+| `/djinn:review quick` | `$djinn-review quick` | a fast first pass: bugs, integration |
+| `/djinn:review` | `$djinn-review` | standard: adds format, security, perf |
+| `/djinn:review full` | `$djinn-review full` | everything, including the executing agents |
+| `/djinn:status` | `$djinn-status` | what is still open, in a few lines |
+| `/djinn:view` | `$djinn-view` | these pages: every audit, in your browser |
+| `/djinn:dispatch <audit> all blocking` | `$djinn-dispatch <audit> all blocking` | one fixer works through the selected findings after your go, then djinn reviews again |
+| `/djinn:brief <audit> <selection or id>` | `$djinn-brief ...` | writes the fix briefs only, for you to read or edit first |
+
+## Asking for the review you want
+
+Four ways to say what runs:
+
+- **A scope**: `quick`, `standard` (the default), `full`, `perf` (speed
+  and hot paths), `cost` (the bill and platform limits).
+- **A scope plus agents**: the scope, a `+` on its own, then agent names.
+  `standard + devils-advocate, cost-complexity-reviewer`.
+- **Your own list**: agent names separated by commas.
+  `bugs-reviewer, security-reviewer`. known-bugchecker and synthesis are
+  added for you.
+- **A goal**: `--goal "what this change is supposed to do"`. devils-advocate
+  and test-strategist measure the code against it.
+
+The agent catalog below says what each agent looks for and which scopes
+run it. Each name opens that agent's full prompt, so you can read exactly
+what it is told to do.
+
+## Example: a chat feature your customers use
+
+You are adding an LLM chat assistant that customers talk to directly. A
+standard review checks the code; you also want to know whether it does what
+a customer-facing model needs, and what it will cost. Ask for:
+
+```
+/djinn:review standard + devils-advocate, cost-complexity-reviewer --goal "A chat assistant customers use directly. It answers only about our products, is rate limited per user, never shows one customer another customer's data, and every model call has a timeout and a spend cap."
+```
+
+On Codex, the same words after `$djinn-review`.
+
+What the two added agents bring:
+
+- **devils-advocate** finds the gap between what a change claims and what
+  the code does. With that goal it checks each promise: is there a per-user
+  rate limit on the chat route, does anything keep answers to your
+  products, can one customer's conversation reach another's, does every
+  model call carry a timeout and a cap.
+- **cost-complexity-reviewer** is the bill and ceiling auditor: paid calls
+  per request, the model API's rate limits and quotas, timeouts, and spend
+  that grows faster than your traffic. Fill the `cost` block in
+  `.djinn/config.yaml` (the API's name, price, rate limit, and the name of
+  the environment variable holding its key, never the key) so it can do
+  the arithmetic.
+
+The standard reviewers still run: security-reviewer traces untrusted input
+to anything dangerous, which covers a customer's text reaching a place it
+should not.
+
+**What djinn does not have yet:** a reviewer written for LLM safety itself,
+such as prompt injection, jailbreaks and filtering what the model says. It
+finds those problems only when your goal names them (devils-advocate) or
+when security-reviewer traces customer text to a dangerous place. Name
+your guardrails in `--goal` so they get checked.
+
+## After a review
+
+- Read the verdict and the open findings here, or with `status`.
+- Fix by hand, or let djinn's fixer do it (below).
+- Commit `.djinn/` and, if your team keeps them, `audits/`.
+
+## How fixing works: brief, dispatch, the fixer
+
+Fixing is two commands and a gate you control. The usual way is one line:
+
+```
+/djinn:dispatch <audit> all blocking
+```
+
+(`$djinn-dispatch` on Codex.) That picks the findings, writes the briefs,
+shows you the plan, and waits for your go.
+
+**Picking what to fix.** After the audit folder, say which findings:
+
+- `all highs`: every open HIGH.
+- `all blocking`: every open HIGH and MEDIUM.
+- `all`: HIGH, MEDIUM and LOW.
+- `with recs`: also the recommendations. `with debt`: also the DEBT
+  items, which are never included unless you name them.
+- or a list: `HIGH-1, MEDIUM-3`.
+
+**One fixer for the lot.** By default one fixer agent works through up to
+20 findings in one go, so it reads your conventions and code once, not
+once per bug. More than 20 are split into groups that run one after
+another: 25 findings is "2 fixers in series, 20 then 5", and the plan says
+so before anything runs. Change it in the same line: `--max 30` for bigger
+groups, or `one each` for a fresh fixer per finding (slower, but each fix
+starts with a clean slate).
+
+1. **Brief.** djinn writes a brief for each group into the audit's
+   `fixes/` folder: every finding, what to change, a testable check for
+   each, and the work set (the exact files the fixer may touch). It
+   changes no code. You can run this step alone with `brief <audit>
+   <selection>` (or `brief <audit> <id>` for one finding), read it and
+   edit it before dispatching: it is the contract.
+2. **The plan and your go.** Dispatch prints what will run, in what order,
+   and the build and test commands, then **stops and waits for `go`**.
+   Nothing changes before that.
+3. **The fixer**, for each finding in its brief:
+   - confirms the defect is there before editing; if not, it reports
+     `NOT-PRESENT` and moves on;
+   - edits only files in the work set. If a finding needs another file, it
+     reports that finding `BLOCKED_SCOPE` with the files it needs, skips
+     it, and carries on with the rest;
+   - after the last finding, runs your build, fixes anything it broke, and
+     checks every finding's criteria;
+   - never commits, pushes, stashes or switches branches.
+4. **After each group** dispatch saves the diff and the fixer's report in
+   `fixes/`, with one line per finding: FIXED, NOT-PRESENT or BLOCKED.
+   Findings that did not get fixed stay open; the next group still runs.
+   A broken build stops the run.
+5. **Then it reviews again**, on its own: a new round reads the combined
+   change, checks every fixed finding, and names any file a fixer changed
+   outside its work set as a scope leak. At most three rounds; after that,
+   a person decides.
+
+Nothing is committed. You read the diffs, run your own checks, and commit
+when you are satisfied.
+
+On Codex the fixer is held to its work set by its instructions, since
+Codex cannot lock an agent to a list of files; the scope leak check and
+the next round's review are what catch a slip. `--prove`, which runs the
+narrowest test per fix under memory caps, is Claude Code only for now.
+
+## On Codex
+
+- djinn's questions (the model, and dispatch's go, rounds, tests and
+  fixers) come up in Codex's picker, which does not open by itself: press
+  **Shift+Left** to answer. Typing `go` instead takes every default.
+- The first review asks which model the agents run on. Add `default` to
+  the command to skip the question.
+- Codex runs 3 agents at a time unless started with
+  `-c agents.max_concurrent_threads_per_session=8`; djinn tells you and
+  offers to make it permanent.
+- Codex cannot lock one agent to read only, so the read-only reviewers are
+  read only by their instructions.

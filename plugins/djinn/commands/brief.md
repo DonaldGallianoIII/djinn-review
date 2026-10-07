@@ -1,0 +1,220 @@
+---
+name: brief
+description: Generate a fix brief skeleton from a synthesis finding, or one group brief per 20 findings from a selection (all highs, all blocking, all, with recs, with debt, or a list of ids) so one fixer handles many. Usage - /djinn:brief <audit-folder> <finding-id | selection> [one each] [--max <n>] where finding-id is a synthesis id like HIGH-1 or MEDIUM-3. Creates <audit-folder>/fixes/<id>-<slug>.md pre-filled from the finding. The human and the orchestrator fill in WHY and confirm work_set before dispatching.
+allowed-tools: Read, Grep, Glob, Write, Bash
+---
+
+# Djinn Fix Brief Generator
+
+You are creating a fix brief (a one-page contract for a single fix) so it
+can be dispatched to a fixer (the agent that edits code). The orchestrator
+is the main Claude session running this command.
+
+Read `${CLAUDE_PLUGIN_ROOT}/CONTRACTS.md` sections 1, 2, 5, 6, and 7 first.
+
+## Step 1: Parse arguments
+
+`$ARGUMENTS` is `<audit-folder> <finding-id>`, or `<audit-folder>
+<selection>` for a group (see Selection mode below).
+
+- audit-folder: a path like `audits/2026-09-12-1402-standard`, or a round
+  folder inside one like `audits/2026-09-12-1402-standard/round-2`.
+- finding-id: a synthesis id in the form `<TIER>-<n>`, for example
+  `HIGH-1`, `MEDIUM-3`, `LOW-2`.
+
+If either is missing or ambiguous, ask the user. Do not guess.
+
+A single finding id goes on to Step 2. Anything else is a selection.
+
+## Selection mode: one fixer for many findings
+
+`MAX_GROUP` is 20: the most findings one group brief, and so one fixer,
+takes. It is a named constant of this command, Donald's number; `--max <n>`
+overrides it for one run.
+
+1. **Read the selection.** It is one or more of these, in any order:
+   - `all highs` or `highs`: every open HIGH.
+   - `all blocking` or `blocking`: every open HIGH and MEDIUM.
+   - `all`: every open HIGH, MEDIUM and LOW.
+   - `with recs` (also `with recs taken`): adds every REC of the latest
+     round.
+   - `with debt`: adds every DEBT of the latest round. DEBT is never
+     included unless named.
+   - a comma list of ids, `HIGH-1, MEDIUM-3, LOW-7`: exactly those.
+   - `one each`: write a single brief per selected finding (Steps 2 to 7,
+     once per finding) instead of group briefs.
+   - `--max <n>`: the group size for this run.
+   Anything else: say which words are understood, and stop.
+2. **Collect the findings.** From the latest round's `findings.json`
+   (CONTRACTS.md section 12): the `open` list for HIGH, MEDIUM and LOW, so
+   a finding still open from an earlier round is included and one already
+   resolved is not; the latest round's `findings` for REC and DEBT. With
+   no `findings.json`, read the latest `synthesis.md` Fix List and say so.
+   Skip any finding a `pending` or `landed` brief under `fixes/` already
+   names, and list the skipped ids. Order: tier (HIGH, MEDIUM, LOW, DEBT,
+   REC), then round, then id number.
+3. **Split.** Cut the ordered list into groups of at most `MAX_GROUP`, in
+   order. 25 findings make two groups, 20 then 5. Each group after the
+   first `depends_on` the one before it, so they run in series, one fixer
+   each.
+4. **Per finding**, do Step 2's citation check and Step 3's work set,
+   exactly as for a single brief. A LINE MISMATCH is marked on that
+   finding's section; `# UNCERTAIN` and `# OUTSIDE AUDIT SCOPE` marks stay
+   on the work set entries.
+5. **Write each group brief** from
+   `${CLAUDE_PLUGIN_ROOT}/templates/fix-brief-group.md` (stop if it cannot
+   be read): `{{GROUP_ID}}` is `group-<k>-of-<n>-<YYYYMMDD-HHMM>`, the
+   `findings` list holds one entry per finding, the work set is the union
+   of the findings' work sets (an entry keeps its marks), and the FINDINGS
+   section has one block per finding, each with the quoted finding, what to
+   change, and at least one testable criterion. `{{PART_OF}}` reads
+   `, part <k> of <n>, after <previous group id>` for every group after
+   the first, else nothing. Write to
+   `<audit-folder>/fixes/group-<k>-of-<n>-<YYYYMMDD-HHMM>.md`, and one ledger
+   line per group as Step 7 shows, with `<n> findings` in place of the id.
+6. **Report**, in place of Step 8:
+   ```
+   Selected <n> findings (<selection>): <ids, compressed as HIGH-1 to HIGH-4>
+   Already briefed, skipped: <ids or none>
+   Plan: <g> fixer(s) in series, <sizes, e.g. 20 then 5>. Override with --max <n>, or one each.
+   Briefs: <paths>
+   Next: fill in WHY if anything was decided, then /djinn:dispatch <paths in order>.
+   ```
+   and the needs-input lists (UNCERTAIN entries, OUTSIDE AUDIT SCOPE files,
+   line mismatches) once for the whole selection.
+
+LOW, DEBT and REC need no per-finding confirmation in selection mode: the
+owner named them.
+
+## Step 2: Read the config, the context, and the finding
+
+1. Read `.djinn/config.yaml` for `build_cmd` and `test_cmd`.
+2. Read `<audit-folder>/context.md` for `merge_base` and read
+   `<audit-folder>/fence.txt`.
+3. Read `<audit-folder>/synthesis.md`. Locate the finding whose id matches
+   exactly. If it does not exist, stop and list the ids that do.
+4. Take from the finding: tier, file:line, one-line description, the source
+   agents, and the report path. Open the named agent report(s) and read
+   the full finding text.
+5. If the tier is LOW, DEBT, or REC: say in the Step 8 report that this
+   finding does not block a merge, and ask the user to confirm they want a
+   brief for it before you write one.
+
+**Verify the citation.** Open the cited file at the cited line. Confirm the
+symbol or construct the finding names is actually there. If it is not (file
+moved, line drifted, synthesis mis-merged two findings), write
+`# LINE MISMATCH: <what is actually at that line>` next to the reference in
+WHAT and say so in the Step 8 report. Do not silently correct the line
+number.
+
+## Step 3: Build the work set
+
+If `<audit-folder>/agents/pipe-connector.md` exists and covers the file(s)
+in the finding, take from it: the importer list (feeds `work_set.files`)
+and the exported symbols touched (feeds `symbols_touched`). Mark the brief
+`work_set_source: pipe-connector`.
+
+Otherwise: grep the repo for importers of the affected file and for callers
+of any symbol the finding names. Pre-fill `work_set.files` and mark each
+inferred entry with a trailing `# UNCERTAIN`. Mark the brief
+`work_set_source: inferred`.
+
+Leave `symbols_renamed` empty unless the finding text itself proposes a
+rename in the form `old -> new`. Never invent a target name; a new name is
+a deliberation decision.
+
+Any file placed in `work_set.files` that is not in `fence.txt` gets a
+trailing `# OUTSIDE AUDIT SCOPE`. List those in the Step 8 report. The
+reviewers never read those files.
+
+## Step 4: Check for overlap
+
+Scan the rest of the synthesis Fix List for entries citing the same file.
+List any existing brief under `<audit-folder>/fixes/` whose
+`work_set.files` shares a file with this one. Report both lists in Step 8
+as "possible overlap". The human decides whether to merge.
+
+## Step 5: Load the template
+
+Read `${CLAUDE_PLUGIN_ROOT}/templates/fix-brief.md`. If it cannot be read,
+stop and report. Do not reconstruct the template from memory.
+
+## Step 6: Fill the skeleton
+
+- `{{FIX_ID}}`: `<finding-id>-<slug>` where slug is 3 to 5 lowercase words
+  joined by hyphens, from the finding description. Example:
+  `HIGH-1-rename-shadowed-fn`.
+- `{{SEVERITY}}`: the tier word, copied verbatim from the synthesis heading.
+- `{{ISO_DATE}}`: today, `YYYY-MM-DD`.
+- `{{MODEL}}`: the model running this command.
+- `{{WORK_SET_SOURCE}}`: `pipe-connector` or `inferred`.
+- `{{AUDIT_FILE}}`: the most specific agent report that raised it.
+- `{{AGENT_NAME}}`, `{{QUOTED_FINDING}}`: from that report, verbatim.
+- `{{SYMPTOM}}`: one line, the observable symptom.
+- `{{SYNTHESIS_FILE}}`, `{{PIPE_CONNECTOR_FILE_OR_NONE}}`: real paths.
+- `{{FILE_PATHS}}`: files the fixer will need to read for context, not
+  just edit.
+- `{{BUILD_CMD}}`, `{{TEST_CMD}}`: from config, or `NONE CONFIGURED`.
+
+**WHAT**: draft from the finding. Name files and symbols, not "this" or
+"the function".
+
+**WHY**: keep the quoted finding, keep the TODO marker. Do not speculate on
+the deliberation context. That is the human's job. Shape:
+
+```
+From <agent>: "<quoted finding>"
+
+**TODO (deliberation context):** _<fill in what was decided with the user>_
+
+This fix addresses <symptom>. <One line on the cascade, for example:
+pipe-connector shows N external callers across <file A> and <file B>; the
+change must reach all of them.>
+```
+
+**SUCCESS CRITERIA**: testable checkboxes derived from WHAT. Always include
+the build criterion and the no-lingering-references criterion from the
+template.
+
+## Step 7: Write the brief and the ledger line
+
+`mkdir -p <audit-folder>/fixes/`. Write to
+`<audit-folder>/fixes/<finding-id>-<slug>.md`.
+
+If a brief with that filename exists: read its `status`. If it is anything
+other than `pending`, refuse to overwrite; offer suffix or abort. If
+`pending`, offer suffix, overwrite, or abort.
+
+Append one line to `audits/LEDGER.md` (create with the header row from
+CONTRACTS.md section 6 if missing):
+
+```
+| <YYYY-MM-DD HH:MM> | brief | <audit-folder> | <finding-id> -> fixes/<file> | work_set=<pipe-connector|inferred> | n/a |
+```
+
+## Step 8: Report
+
+- Path of the brief.
+- Fields needing human input: always the TODO in WHY; the `# UNCERTAIN`
+  entries if work_set was inferred.
+- Files marked `# OUTSIDE AUDIT SCOPE`, if any.
+- Line mismatch, if any.
+- Possible overlap, if any.
+- Next step: "Fill in WHY, verify work_set, then
+  `/djinn:dispatch <brief-path>`. To fix many findings with one fixer,
+  brief a selection instead: `/djinn:brief <audit-folder> all blocking`."
+
+## Rules
+
+- Do NOT dispatch. Dispatch is a separate command.
+- Do NOT fill WHY's deliberation context with speculation. The TODO stays.
+- Do NOT modify any code.
+- Bash is for `date` and `mkdir -p` only. No build, no tests, no git
+  command that changes state.
+
+## Runtime notes
+
+Claude Code specific: `$ARGUMENTS`, `allowed-tools`,
+`${CLAUDE_PLUGIN_ROOT}`. An adapter for another runtime supplies the same
+three. This command runs in the caller's session and writes no code, so it
+carries no model line.
